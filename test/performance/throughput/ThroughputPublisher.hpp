@@ -41,6 +41,9 @@
 #include <fastdds/dds/subscriber/Subscriber.hpp>
 #include <fastdds/dds/publisher/Publisher.hpp>
 
+#include <fastdds/dds/subscriber/DataReader.hpp>
+#include <fastdds/dds/publisher/DataWriter.hpp>
+
 #include <fastdds/dds/subscriber/DataReaderListener.hpp>
 #include <fastdds/dds/publisher/DataWriterListener.hpp>
 
@@ -103,7 +106,7 @@ private:
     // Entities
     eprosima::fastdds::dds::DomainParticipant* participant_ = nullptr;
     eprosima::fastdds::dds::Publisher* publisher_ = nullptr;
-    eprosima::fastdds::dds::Publisher* subscriber_ = nullptr;
+    eprosima::fastdds::dds::Subscriber* subscriber_ = nullptr;
     eprosima::fastdds::dds::DataWriter* data_writer_ = nullptr;
     eprosima::fastdds::dds::DataWriter* command_writer_ = nullptr;
     eprosima::fastdds::dds::DataReader* command_reader_ = nullptr;
@@ -129,20 +132,22 @@ private:
     // Data and Commands
     eprosima::fastdds::dds::TypeSupport throughput_command_type_;
     // Static Data
-    ThroughputType* throughput_type_ = nullptr;
+    ThroughputType* throughput_data_ = nullptr;
     eprosima::fastdds::dds::TypeSupport throughput_data_type_;
     // Dynamic Data
     eprosima::fastrtps::types::DynamicData* dynamic_data_ = nullptr;
     eprosima::fastdds::dds::TypeSupport dynamic_pub_sub_type_;
-    DataWriterQos dw_qos_;
+    eprosima::fastdds::dds::DataWriterQos dw_qos_;
 
     // Results
     std::vector<TroughputResults> results_;
 
     // Flags
-    bool dynamic_types_ = false; 
+    bool dynamic_types_ = false;
     bool ready_ = true;
     bool reliable_ = false;
+    bool hostname_ = false;
+    uint32_t pid_ = false;
 
     // Test configuration
     int forced_domain_ = 0;

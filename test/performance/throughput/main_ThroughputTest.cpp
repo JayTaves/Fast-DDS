@@ -506,7 +506,7 @@ int main(
                     dynamic_types,
                     forced_domain)
                 && throughput_publisher.ready())
-        {
+        {
             throughput_publisher.run(test_time_sec, recovery_time_ms, demand, msg_size, subscribers);
         }
         else
