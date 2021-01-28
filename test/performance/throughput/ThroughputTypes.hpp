@@ -126,7 +126,7 @@ public:
             const uint32_t& size)
         : buffer_size_(size)
     {
-        setName("ThroughputType");
+        setName(type_name_);
         m_typeSize = size + 4;
         m_isGetKeyDefined = false;
     }
@@ -164,6 +164,8 @@ public:
         const ThroughputType& lt1,
         const ThroughputType& lt2) const;
 
+    // Name
+    static const std::string type_name_ = "ThroughputType";
 };
 
 enum e_Command : uint32_t
