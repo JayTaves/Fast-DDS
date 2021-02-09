@@ -66,26 +66,28 @@ void ThroughputPublisher::DataWriterListener::on_publication_matched(
 // ********************************* DATA WRITER LISTENER ************************************
 // *******************************************************************************************
 
+/*
+ * Our current inplementation of MatchedStatus info:
+ * - total_count(_change) holds the actual number of matches
+ * - current_count(_change) is a flag to signal match or unmatch.
+ *   (TODO: review if fits standard definition)
+ * */
+
 void ThroughputPublisher::CommandReaderListener::on_subscription_matched(
         eprosima::fastdds::dds::DataReader*,
         const eprosima::fastdds::dds::SubscriptionMatchedStatus& info)
 {
     std::unique_lock<std::mutex> lock(throughput_publisher_.command_mutex_);
 
-    if (1 == info.total_count_change)
+    if (1 == info.current_count)
     {
         logInfo(THROUGHPUTPUBLISHER, C_RED << "Pub: COMMAND Sub Matched "
                   << info.total_count << "/" << throughput_publisher_.subscribers_ * 2 << C_DEF);
     }
 
-    if ((throughput_publisher_.command_discovery_count_ = info.total_count)
-            == static_cast<int>(throughput_publisher_.subscribers_ * 2))
-    {
-        // In case it does not enter the if, the lock will be unlock in destruction
-        lock.unlock();
-
-        throughput_publisher_.command_discovery_cv_.notify_one();
-    }
+    matched_ = info.total_count;
+    lock.unlock();
+    throughput_publisher_.command_discovery_cv_.notify_one();
 }
 
 // *******************************************************************************************
@@ -97,13 +99,13 @@ void ThroughputPublisher::CommandWriterListener::on_publication_matched(
 {
     std::unique_lock<std::mutex> lock(throughput_publisher_.command_mutex_);
 
-    if (1 == info.total_count_change)
+    if (1 == info.current_count)
     {
         logInfo(THROUGHPUTPUBLISHER, C_RED << "Pub: COMMAND Pub Matched "
                   << info.total_count << "/" << throughput_publisher_.subscribers_ * 2 << C_DEF);
     }
 
-    if ((throughput_publisher_.command_discovery_count_ = info.total_count)
+    if ((matched_ = info.total_count)
             == static_cast<int>(throughput_publisher_.subscribers_ * 2))
     {
         // In case it does not enter the if, the lock will be unlock in destruction
@@ -220,7 +222,7 @@ bool ThroughputPublisher::init(
         return false;
     }
 
-    /* Update DataWriterQoS with xml profile data */
+    /* Update DataWriterQoS from xml profile data */
     std::string profile_name = "publisher_profile";
 
     if (xml_config_file_.length() > 0
@@ -323,11 +325,6 @@ bool ThroughputPublisher::init(
     }
     t_overhead_ = std::chrono::duration<double, std::micro>(t_end_ - t_start_) / 1001;
     std::cout << "Publisher's clock access overhead: " << t_overhead_.count() << " us"  << std::endl;
-
-    if (command_reader_ == nullptr || command_writer_ == nullptr)
-    {
-        ready_ = false;
-    }
 
     // Endpoints using dynamic data endpoints span the whole test duration
     // Static types and endpoints are created for each payload iteration
@@ -1043,6 +1040,7 @@ bool ThroughputPublisher::destroy_data_endpoints()
         return false;
     }
     data_writer_ = nullptr;
+    data_writer_listener_.reset();
 
     // Delete the Topic
     if (nullptr == data_pub_topic_
@@ -1062,8 +1060,21 @@ bool ThroughputPublisher::destroy_data_endpoints()
     }
 
     throughput_data_type_.reset();
-    dynamic_pub_sub_type_.reset();
-    DynamicTypeBuilderFactory::delete_instance();
 
     return true;
+}
+
+int ThroughputPublisher::total_matches() const
+{
+    // no need to lock because is used always within a
+    // condition variable wait predicate
+
+    int count = data_writer_listener_.get_matches()
+            + command_writer_listener_.get_matches()
+            + command_reader_listener_.get_matches();
+
+    // Each endpoint has a mirror counterpart in the ThroughputSubscriber
+    // thus, the maximun number of matches is 3 * total number of subscribers
+    assert(count >= 0 && count <= 3 * subscribers_);
+    return count;
 }
