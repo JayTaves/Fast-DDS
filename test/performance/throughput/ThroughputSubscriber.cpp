@@ -401,12 +401,13 @@ bool ThroughputSubscriber::init(
 
 void ThroughputSubscriber::process_message()
 {
-    if (command_subscriber_->wait_for_unread_samples({100, 0}))
+    if (command_reader_->wait_for_unread_message({100, 0}))
     {
-        if (command_subscriber_->takeNextData((void*)&command_sub_listener_.command_type_,
-                &command_sub_listener_.info_))
+        if (command_reader_->take_next_sample(
+                (void*)&command_reader_listener_.command_type_,
+                &command_reader_listener_.info_))
         {
-            switch (command_sub_listener_.command_type_.m_command)
+            switch (command_reader_listener_.command_type_.m_command)
             {
                 case (DEFAULT):
                 {
@@ -423,53 +424,55 @@ void ThroughputSubscriber::process_message()
                     data_size_ = command_sub_listener_.command_type_.m_size;
                     demand_ = command_sub_listener_.command_type_.m_demand;
 
-                    if (dynamic_data_)
+                    if (dynamic_types_)
                     {
-                        // Create basic builders
-                        DynamicTypeBuilder_ptr struct_type_builder(
-                            DynamicTypeBuilderFactory::get_instance()->create_struct_builder());
+                        // Create the data sample
+                        MemberId id;
+                        dynamic_data_ = static_cast<DynamicData*>(dynamic_pub_sub_type_->createData());
 
-                        // Add members to the struct.
-                        struct_type_builder->add_member(0, "seqnum",
-                                DynamicTypeBuilderFactory::get_instance()->create_uint32_type());
-                        struct_type_builder->add_member(1, "data",
-                                DynamicTypeBuilderFactory::get_instance()->create_sequence_builder(
-                                    DynamicTypeBuilderFactory::get_instance()->create_byte_type(), data_size_));
+                        if (nullptr == dynamic_data_)
+                        {
+                            logError(THROUGHPUTPUBLISHER,"Iteration failed: Failed to create Dynamic Data");
+                            return false;
+                        }
 
-                        struct_type_builder->set_name("ThroughputType");
-                        dynamic_type_ = struct_type_builder->build();
-                        dynamic_pub_sub_type_.CleanDynamicType();
-                        dynamic_pub_sub_type_.SetDynamicType(dynamic_type_);
+                        // Modify the data Sample
+                        DynamicData* member_data = dynamic_data_->loan_value(
+                                dynamic_data_->get_member_id_at_index(1));
 
-                        Domain::registerType(participant_, &dynamic_pub_sub_type_);
-
-                        dynamic_data_type_ = DynamicDataFactory::get_instance()->create_data(dynamic_type_);
+                        for (uint32_t i = 0; i < data_size; ++i)
+                        {
+                            member_data->insert_sequence_data(id);
+                            member_data->set_byte_value(0, id);
+                        }
+                        dynamic_data_->return_loaned_value(member_data);
+                    }
+                    else if (init_static_types(data_size) && create_data_endpoints())
+                    {
+                        // Create the data sample
+                        throughput_data_ = static_cast<ThroughputType*>(throughput_data_type_.create_data());
                     }
                     else
                     {
-                        delete(throughput_data_type_);
-                        delete(throughput_type_);
-
-                        throughput_data_type_ = new ThroughputDataType(data_size_);
-                        Domain::registerType(participant_, throughput_data_type_);
-                        throughput_type_ = new ThroughputType(data_size_);
+                        logError(THROUGHPUTSUBSCRIBER, "Error preparing static types and endpoints for testing");
+                        return false;
                     }
-
-                    data_subscriber_ = Domain::createSubscriber(participant_, sub_attrs_, &data_sub_listener_);
 
                     ThroughputCommandType command_sample(BEGIN);
                     std::this_thread::sleep_for(std::chrono::milliseconds(50));
                     data_sub_listener_.reset();
                     command_publisher_->write(&command_sample);
 
-                    std::cout << "Waiting for data discovery" << std::endl;
-                    std::unique_lock<std::mutex> data_disc_lock(data_mutex_);
-                    data_discovery_cv_.wait(data_disc_lock, [&]()
-                            {
-                                return data_discovery_count_ > 0;
-                            });
-                    data_disc_lock.unlock();
-                    std::cout << "Discovery data complete" << std::endl;
+                    if (!dynamic_types_)
+                    {
+                        std::cout << "Waiting for data discovery" << std::endl;
+                        std::unique_lock<std::mutex> data_disc_lock(data_mutex_);
+                        data_discovery_cv_.wait(data_disc_lock, [&]()
+                                {
+                                return total_matches() == 3;
+                                });
+                        std::cout << "Discovery data complete" << std::endl;
+                    }
                     break;
                 }
                 case (TEST_STARTS):
@@ -526,20 +529,21 @@ void ThroughputSubscriber::process_message()
 
 void ThroughputSubscriber::run()
 {
-    if (!ready_)
-    {
-        return;
-    }
     std::cout << "Sub Waiting for command discovery" << std::endl;
     {
-        std::unique_lock<std::mutex> lock(command_mutex_);
-        std::cout << "Sub: lock command_mutex_ and wait to " << command_discovery_count_ <<
-            " == 2" << std::endl;     // TODO remove if error disappear"
-        command_discovery_cv_.wait(lock, [&]()
+        std::unique_lock<std::mutex> disc_lock(command_mutex_);
+        command_discovery_cv_.wait(disc_lock, [&]()
                 {
-                    std::cout << "Sub: wait to " << command_discovery_count_ << " == 2" <<
-                        std::endl;     // TODO remove if error disappear"
-                    return command_discovery_count_ >= 2;
+                    if (dynamic_types)
+                    {
+                        // full command and data endpoints discovery
+                        return total_matches() == 3;
+                    }
+                    else
+                    {
+                        // The only endpoints present should be command ones
+                        return total_matches() == 2);
+                    }
                 });
     }
     std::cout << "Sub Discovery command complete" << std::endl;
@@ -568,7 +572,7 @@ void ThroughputSubscriber::run()
             ThroughputCommandType command_sample;
             command_sample.m_command = TEST_RESULTS;
             command_sample.m_demand = demand_;
-            command_sample.m_size = data_size_ + 4 + 4;
+            command_sample.m_size = data_size_ + ThroughputType::overhead;
             command_sample.m_lastrecsample = data_sub_listener_.saved_last_seq_num_;
             command_sample.m_lostsamples = data_sub_listener_.saved_lost_samples_;
 
@@ -615,14 +619,19 @@ void ThroughputSubscriber::run()
         }
     } while (stop_count_ != 2);
 
-    // ThroughputPublisher is waiting for all ThroughputSubscriber publishers and subscribers to unmatch. Leaving the
-    // destruction of the entities to ~ThroughputSubscriber() is not enough for the intraprocess case, because
-    // main_ThroughputTests first joins the publisher run thread and only then it joins this thread. This means that
-    // ~ThroughputSubscriber() is only called when all the ThroughputSubscriber publishers and subscribers are disposed.
-    Domain::removePublisher(command_publisher_);
-    std::cout << "Sub: Command publisher removed" << std::endl;
-    Domain::removeSubscriber(command_subscriber_);
-    std::cout << "Sub: Command subscriber removed" << std::endl;
+
+    if (!dynamic_types)
+    {
+        std::cout << "Sub Waiting for command undiscovery" << std::endl;
+
+        std::unique_lock<std::mutex> disc_lock(command_mutex_);
+        command_discovery_cv_.wait(disc_lock, [&]()
+                {
+                // The only endpoints present should be command ones
+                return total_matches() == 2);
+                });
+        std::cout << "Sub un-Discovery command complete" << std::endl;
+    }
 
     return;
 }

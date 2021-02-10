@@ -361,11 +361,6 @@ ThroughputPublisher::~ThroughputPublisher()
     logInfo(THROUGHPUTPUBLISHER, "Pub: Participant removed");
 }
 
-bool ThroughputPublisher::ready()
-{
-    return ready_;
-}
-
 void ThroughputPublisher::run(
         uint32_t test_time,
         uint32_t recovery_time_ms,
@@ -375,14 +370,9 @@ void ThroughputPublisher::run(
 {
     subscribers_ = subscribers;
 
-    if (!ready_)
-    {
-        return;
-    }
-
     if (demand == 0 || msg_size == 0)
     {
-        if (!this->load_demands_payload())
+        if (!load_demands_payload())
         {
             return;
         }
@@ -452,27 +442,6 @@ void ThroughputPublisher::run(
     // Iterate over message sizes
     for (auto sit = demand_payload_.begin(); sit != demand_payload_.end(); ++sit)
     {
-        // Create the data endpoints if using static types
-        if (!dynamic_types_)
-        {
-            if (init_static_types(msg_size) && create_data_endpoints())
-            {
-                // Wait for the data endpoints discovery
-                std::unique_lock<std::mutex> data_disc_lock(data_mutex_);
-                data_discovery_cv_.wait(data_disc_lock, [&]()
-                        {
-                        // all command and data endpoints must be discovered
-                        return total_matches() == static_cast<int>(subscribers_ * 3);
-                        });
-            }
-            else
-            {
-                logError(THROUGHPUTPUBLISHER, "Error preparing static types and endpoints for testing");
-                test_failure = true;
-                break;
-            }
-        }
-
         // Iterate over burst of messages to send
         for (auto dit = sit->second.begin(); dit != sit->second.end(); ++dit)
         {
@@ -506,6 +475,27 @@ void ThroughputPublisher::run(
             // Set the allocated samples to the max_samples. This is because allocated_sample must be <= max_samples
             dw_qos_.resource_limits().allocated_samples = dw_qos_.resource_limits().max_samples;
 
+            // Create the data endpoints if using static types (right after modifying the QoS)
+            if (!dynamic_types_)
+            {
+                if (init_static_types(msg_size) && create_data_endpoints())
+                {
+                    // Wait for the data endpoints discovery
+                    std::unique_lock<std::mutex> data_disc_lock(data_mutex_);
+                    data_discovery_cv_.wait(data_disc_lock, [&]()
+                            {
+                            // all command and data endpoints must be discovered
+                            return total_matches() == static_cast<int>(subscribers_ * 3);
+                            });
+                }
+                else
+                {
+                    logError(THROUGHPUTPUBLISHER, "Error preparing static types and endpoints for testing");
+                    test_failure = true;
+                    break;
+                }
+            }
+
             for (uint16_t i = 0; i < recovery_times_.size(); i++)
             {
                 // awake the subscribers
@@ -514,7 +504,7 @@ void ThroughputPublisher::run(
                 command.m_demand = *dit;
                 command_writer_->write(&command);
 
-                // wait till subscribers are ready
+                // wait till subscribers are rigged
                 uint32_t subscribers_ready_ = 0;
                 while (subscribers_ready_ < subscribers_)
                 {
@@ -526,6 +516,17 @@ void ThroughputPublisher::run(
                     }
                 }
 
+                if (!dynamic_types_)
+                {
+                    // Wait all subscribers data endpoint availability
+                    std::unique_lock<std::mutex> disc_lock(command_mutex_);
+                    command_discovery_cv_.wait(disc_lock,
+                            [&]()
+                            {
+                            return total_matches() == static_cast<int>(subscribers_ * 3);
+                            });
+                }
+
                 // run this test iteration test
                 if (!test(test_time, recovery_times_[i], *dit, sit->first))
                 {
@@ -533,26 +534,26 @@ void ThroughputPublisher::run(
                     break;
                 }
             }
-        }
 
-        // Destroy the data endpoints if using static types
-        if (!dynamic_types_)
-        {
-            if (destory_data_endpoints())
+            // Destroy the data endpoints if using static types
+            if (!dynamic_types_)
             {
-                // Wait till all subscriber's endpoints are removed
-                std::unique_lock<std::mutex> data_disc_lock(data_mutex_);
-                data_discovery_cv_.wait(data_disc_lock, [&]()
-                        {
-                        // only command endpoints must be discovered
-                        return total_matches() == static_cast<int>(subscribers_ * 2);
-                        });
-            }
-            else
-            {
-                logError(THROUGHPUTPUBLISHER, "Error removing static types and endpoints for testing");
-                test_failure = true;
-                break;
+                if (destory_data_endpoints())
+                {
+                    // Wait till all subscriber's endpoints are removed
+                    std::unique_lock<std::mutex> data_disc_lock(data_mutex_);
+                    data_discovery_cv_.wait(data_disc_lock, [&]()
+                            {
+                            // only command endpoints must be discovered
+                            return total_matches() == static_cast<int>(subscribers_ * 2);
+                            });
+                }
+                else
+                {
+                    logError(THROUGHPUTPUBLISHER, "Error removing static types and endpoints for testing");
+                    test_failure = true;
+                    break;
+                }
             }
         }
     }
@@ -573,7 +574,7 @@ void ThroughputPublisher::run(
     {
         std::cout << "ALL_STOPS Not acked! in 20(s)" << std::endl;
     }
-    else
+    else if (!dynamic_types_)
     {
         // Wait for the disposal of all ThroughputSubscriber publishers and subscribers. Wait for 5s, checking status
         // every 100 ms. If after 5 s the entities have not been disposed, shutdown ThroughputPublisher without
@@ -581,12 +582,14 @@ void ThroughputPublisher::run(
         std::unique_lock<std::mutex> disc_lock(command_mutex_);
         for (uint16_t i = 0; i <= 50; i++)
         {
-            if (command_discovery_cv_.wait_for(disc_lock, std::chrono::milliseconds(100), [&]()
+            if (command_discovery_cv_.wait_for(disc_lock, std::chrono::milliseconds(100),
+                    [&]()
                     {
+                        // only the command endpoints will remain in this case
                         return total_matches() == static_cast<int>(subscribers_ * 2);
                     }))
             {
-                std::cout << "Pub: All ThroughputSubscriber publishers and subscribers unmatched" << std::endl;
+                std::cout << "Pub: All ThroughputSubscriber data endpoints are unmatched" << std::endl;
                 break;
             }
         }
