@@ -19,9 +19,11 @@
 
 #include "ThroughputTypes.hpp"
 
-const std::string ThroughputDataType::type_name_ = "ThroughputType";
-
 #include <cstring>
+#include <cstddef>
+
+const size_t ThroughputDataType::overhead = offsetof(ThroughputDataType, data);
+const std::string ThroughputDataType::type_name_ = "ThroughputType";
 
 using namespace eprosima::fastrtps;
 using namespace eprosima::fastrtps::rtps;

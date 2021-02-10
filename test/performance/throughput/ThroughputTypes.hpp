@@ -104,7 +104,9 @@ inline void print_results(
  * */
 typedef struct alignas(4) ThroughputType
 {
+    // identifies the sample sent
     uint32_t seqnum;
+    // actual payload
     uint8_t data[1];
 
     ThroughputType(
@@ -112,6 +114,9 @@ typedef struct alignas(4) ThroughputType
         : seqnum(number)
     {
     }
+
+    // This struct overhead
+    static const size_t overhead;
 
 } ThroughputType;
 
