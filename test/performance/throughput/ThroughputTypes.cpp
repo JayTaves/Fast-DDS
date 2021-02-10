@@ -46,7 +46,7 @@ bool ThroughputDataType::serialize(
     ThroughputType* lt = (ThroughputType*)data;
     memcpy(payload->data, &lt->seqnum, sizeof(lt->seqnum));
     memcpy(payload->data + 4, lt->data, buffer_size_);
-    payload->length = 4 + buffer_size_;
+    payload->length = m_typeSize;
     return true;
 }
 

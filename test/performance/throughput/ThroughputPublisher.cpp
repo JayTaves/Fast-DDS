@@ -390,7 +390,7 @@ void ThroughputPublisher::run(
     else
     {
         payload_ = msg_size;
-        demand_payload_[msg_size - 8].push_back(demand);
+        demand_payload_[msg_size - ThroughputType::overhead].push_back(demand);
     }
 
     /* Populate the recovery times vector */
