@@ -333,7 +333,7 @@ bool ThroughputPublisher::init(
 
 ThroughputPublisher::~ThroughputPublisher()
 {
-    // Static type endpoints should have been remove for each payload iteration
+    // Static type endpoints should have been remove for each demand map iteration
     if (dynamic_types_)
     {
         destroy_data_endpoints();
@@ -538,7 +538,7 @@ void ThroughputPublisher::run(
             // Destroy the data endpoints if using static types
             if (!dynamic_types_)
             {
-                if (destory_data_endpoints())
+                if (destroy_data_endpoints())
                 {
                     // Wait till all subscriber's endpoints are removed
                     std::unique_lock<std::mutex> data_disc_lock(data_mutex_);

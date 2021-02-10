@@ -76,52 +76,36 @@ void ThroughputSubscriber::DataReaderListener::on_subscription_matched(
 
 void ThroughputSubscriber::DataReaderListener::on_data_available(DataReader* reader)
 {
-    // TODO: udpate new API
-
     // In case the TSubscriber is removing entities because a TEST_ENDS msg, it waits
-    std::unique_lock<std::mutex> lecture_lock(throughput_subscriber_.data_mutex_);
+    std::lock_guard<std::mutex> lecture_lock(throughput_subscriber_.data_mutex_);
+    auto& sub = throughput_subscriber_;
+    void * data = sub.dynamic_types_ ? sub.dynamic_data_ : sub.throughput_type_;
 
-    if (throughput_subscriber_.dynamic_data_)
+    if (nullptr == data)
     {
-        while (subscriber->takeNextData((void*)throughput_subscriber_.dynamic_data_type_, &info_))
-        {
-            if (info_.sampleKind == ALIVE)
-            {
-                if ((last_seq_num_ + 1) < throughput_subscriber_.dynamic_data_type_->get_uint32_value(0))
-                {
-                    lost_samples_ += throughput_subscriber_.dynamic_data_type_->get_uint32_value(0) - last_seq_num_ - 1;
-                }
-                last_seq_num_ = throughput_subscriber_.dynamic_data_type_->get_uint32_value(0);
-            }
-            else
-            {
-                std::cout << "NOT ALIVE DATA RECEIVED" << std::endl;
-            }
-        }
+        std::cout << "DATA MESSAGE RECEIVED BEFORE COMMAND READY_TO_START" << std::endl;
+        return;
     }
-    else
+
+    while (reader_->take_next_sample(
+                (void*)throughput_subscriber_.dynamic_data_,
+                &info_))
     {
-        if (nullptr != throughput_subscriber_.throughput_type_)
+        if (info_.sampleKind == ALIVE)
         {
-            while (subscriber->takeNextData((void*)throughput_subscriber_.throughput_type_, &info_))
+            uint32_t seq_num = sub.dynamic_types_
+                ? sub.dynamic_data_type_->get_uint32_value(0)
+                : sub.throughput_type_->seqnum;
+
+            if ((last_seq_num_ + 1) < seq_num)
             {
-                if (info_.sampleKind == ALIVE)
-                {
-                    if ((last_seq_num_ + 1) < throughput_subscriber_.throughput_type_->seqnum)
-                    {
-                        lost_samples_ += throughput_subscriber_.throughput_type_->seqnum - last_seq_num_ - 1;
-                    }
-                    last_seq_num_ = throughput_subscriber_.throughput_type_->seqnum;
-                }
-                else
-                {
-                    std::cout << "NOT ALIVE DATA RECEIVED" << std::endl;
-                }
+                lost_samples_ += seq_num - last_seq_num_ - 1;
             }
+            last_seq_num_ = seq_num;
         }
         else
         {
-            std::cout << "DATA MESSAGE RECEIVED BEFORE COMMAND READY_TO_START" << std::endl;
+            std::cout << "NOT ALIVE DATA RECEIVED" << std::endl;
         }
     }
 }
@@ -195,8 +179,31 @@ ThroughputSubscriber::ThroughputSubscriber(
 
 ThroughputSubscriber::~ThroughputSubscriber()
 {
-    Domain::removeParticipant(participant_);
-    std::cout << "Sub: Participant removed" << std::endl;
+    if (dynamic_types_)
+    {
+        destroy_data_endpoints();
+    }
+    else if (nullptr != data_reader_
+            || nullptr != data_pub_topic_
+            || !throughput_data_type_)
+    {
+        logError(THROUGHPUTSUBSCRIBER, "ERROR unregistering the DATA type");
+        return;
+    }
+
+    // Remove command endpoints
+    subscriber_->delete_datareader(command_reader_);
+    participant_->delete_subscriber(subscriber_);
+
+    publisher_->delete_datawriter(command_writer_);
+    participant_->delete_publisher(publisher_);
+
+    participant_->delete_topic(command_sub_topic_);
+    participant_->delete_topic(command_pub_topic_);
+
+    // Remove the participant
+    DomainParticipantFactory::get_instance()->delete_participant(participant_);
+    logInfo(THROUGHPUTSUBSCRIBER, "Sub: Participant removed");
 }
 
 bool ThroughputSubscriber::init(
@@ -432,8 +439,10 @@ void ThroughputSubscriber::process_message()
 
                         if (nullptr == dynamic_data_)
                         {
-                            logError(THROUGHPUTPUBLISHER,"Iteration failed: Failed to create Dynamic Data");
-                            return false;
+                            std::lock_guard<std::mutex> lock(command_mutex_);
+                            stop_count_ = 2;
+                            logError(THROUGHPUTSUBSCRIBER,"Iteration failed: Failed to create Dynamic Data");
+                            return;
                         }
 
                         // Modify the data Sample
@@ -454,8 +463,10 @@ void ThroughputSubscriber::process_message()
                     }
                     else
                     {
+                        std::lock_guard<std::mutex> lock(command_mutex_);
+                        stop_count_ = 2;
                         logError(THROUGHPUTSUBSCRIBER, "Error preparing static types and endpoints for testing");
-                        return false;
+                        return;
                     }
 
                     ThroughputCommandType command_sample(BEGIN);
@@ -486,35 +497,43 @@ void ThroughputSubscriber::process_message()
                     t_end_ = std::chrono::steady_clock::now();
                     std::cout << "Command: TEST_ENDS" << std::endl;
                     data_sub_listener_.save_numbers();
-                    std::unique_lock<std::mutex> lock(command_mutex_);
-                    stop_count_ = 1;
-                    lock.unlock();
-
-                    // It stops the data listener to avoid seg faults with already removed entities
-                    // It waits if the data listener is in the middle of a reading
-                    std::unique_lock<std::mutex> lecture_lock(data_mutex_);
-
-                    if (dynamic_data_)
                     {
-                        DynamicTypeBuilderFactory::delete_instance();
-                        DynamicDataFactory::get_instance()->delete_data(dynamic_data_type_);
+                        std::lock_guard<std::mutex> lock(command_mutex_);
+                        stop_count_ = 1;
                     }
-                    else
-                    {
-                        delete(throughput_type_);
-                        throughput_type_ = nullptr;
-                    }
-                    lecture_lock.unlock();
 
-                    sub_attrs_ = data_subscriber_->getAttributes();
+                    // remove the data endpoints on static case
+                    if (!dynamic_types_ && !destroy_data_endpoints())
+                    {
+                        std::lock_guard<std::mutex> lock(command_mutex_);
+                        stop_count_ = 2;
+                        logError(THROUGHPUTSUBSCRIBER,"Iteration failed: Failed to remove static data endpoints");
+                    }
+
+                    {
+                        // It stops the data listener to avoid seg faults with already removed entities
+                        // It waits if the data listener is in the middle of a reading
+                        std::lock_guard<std::mutex> lecture_lock(data_mutex_);
+
+                        if (dynamic_data_)
+                        {
+                            DynamicDataFactory::get_instance()->delete_data(dynamic_data_);
+                            dynamic_data_ = nullptr;
+                        }
+                        else
+                        {
+                            throughput_data_type_.delete_data(throughput_data_);
+                            throughput_type_ = nullptr;
+                        }
+                    }
+
                     break;
                 }
                 case (ALL_STOPS):
                 {
                     std::cout << "-----------------------------------------------------------------------" << std::endl;
-                    std::unique_lock<std::mutex> lock(command_mutex_);
+                    std::lock_guard<std::mutex> lock(command_mutex_);
                     stop_count_ = 2;
-                    lock.unlock();
                     std::cout << "Command: ALL_STOPS" << std::endl;
                     break;
                 }
@@ -554,19 +573,24 @@ void ThroughputSubscriber::run()
 
         if (stop_count_ == 1)
         {
-            std::cout << "Waiting for data matching removal" << std::endl;
-            std::unique_lock<std::mutex> data_disc_lock(data_mutex_);
-            data_discovery_cv_.wait(data_disc_lock, [&]()
-                    {
-                        return data_discovery_count_ == 0;
-                    });
-            data_disc_lock.unlock();
-
-            std::cout << "Waiting clean state" << std::endl;
-            while (!data_subscriber_->isInCleanState())
+            if (!dynamic_types)
             {
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                std::cout << "Waiting for data matching removal" << std::endl;
+                std::unique_lock<std::mutex> data_disc_lock(data_mutex_);
+                data_discovery_cv_.wait(data_disc_lock, [&]()
+                        {
+                        // for static types only command endpoints must be matched
+                        return total_matches() == 2;
+                        });
             }
+
+           while (dynamic_types_ && data_reader_->wait_for_unread_message())
+           {
+               std::cout << "Waiting clean state" << std::endl;
+               std::this_thread::sleep_for(std::chrono::milliseconds(50));
+           }
+
+            // HIC SUNT DRACONES
 
             std::cout << "Sending results" << std::endl;
             ThroughputCommandType command_sample;
